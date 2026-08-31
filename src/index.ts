@@ -59,7 +59,7 @@ function captureSnapshot(options: BuildSystemPromptOptions): void {
 	};
 }
 
-function unescapeXml(value: string): string {
+export function unescapeXml(value: string): string {
 	return value
 		.replace(/&quot;/g, '"')
 		.replace(/&apos;/g, "'")
@@ -72,8 +72,12 @@ function unescapeXml(value: string): string {
  * Recover loaded skills, context files, and tools from the effective system
  * prompt string when structured options are unavailable (hotkey path, fresh
  * session). Skills appear as <skill><name>…</name>; context files as path="…".
+ *
+ * NOTE: This is a heuristic fallback that tracks the current pi prompt format
+ * (the <project_instructions path="…"> tag and the "Available tools:" block).
+ * A pi format change breaks it silently; structured options always win.
  */
-function parseFromPrompt(prompt: string): {
+export function parseFromPrompt(prompt: string): {
 	skills: string[];
 	contextFiles: string[];
 	tools: string[];
@@ -98,17 +102,68 @@ function parseFromPrompt(prompt: string): {
 // Render helpers (ANSI-safe, width-aware)
 // ---------------------------------------------------------------------------
 
-/** Wrap a list of short words into lines no wider than maxWidth. */
-function wrapWords(words: string[], maxWidth: number, prefix = ""): string[] {
+// --- Display width -----------------------------------------------------------
+
+/** Approximate terminal column width for a code point (0, 1, or 2 columns). */
+export function isWideCodePoint(cp: number): boolean {
+	return (
+		(cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+		(cp >= 0x2e80 && cp <= 0xa4cf) || // CJK radicals .. Yijing hexagrams
+		(cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
+		(cp >= 0xf900 && cp <= 0xfaff) || // CJK compatibility ideographs
+		(cp >= 0xfe30 && cp <= 0xfe4f) || // CJK compatibility forms
+		(cp >= 0xff00 && cp <= 0xff60) || // Fullwidth forms
+		(cp >= 0xffe0 && cp <= 0xffe6) || // Fullwidth signs
+		(cp >= 0x1f300 && cp <= 0x1faff) || // Emoji (most)
+		cp >= 0x20000 // CJK extensions B+
+	);
+}
+
+export function charDisplayWidth(ch: string): number {
+	// Combining marks, zero-width spaces, variation selectors, BOM: 0 columns.
+	if (/[\u0300-\u036f\u200b-\u200f\ufe00-\ufe0f\ufeff]/.test(ch)) {
+		return 0;
+	}
+	return isWideCodePoint(ch.codePointAt(0) ?? 0) ? 2 : 1;
+}
+
+/** Visible column width of a line, ignoring ANSI escape sequences. */
+export function displayWidth(text: string): number {
+	let width = 0;
+	let inEscape = false;
+	for (const ch of text) {
+		if (inEscape) {
+			if (/[a-zA-Z]/.test(ch)) {
+				inEscape = false;
+			}
+			continue;
+		}
+		if (ch === "\x1b") {
+			inEscape = true;
+			continue;
+		}
+		width += charDisplayWidth(ch);
+	}
+	return width;
+}
+
+// --- Wrapping / fitting -------------------------------------------------------
+
+/** Wrap a list of short words into lines no wider than maxWidth columns. */
+export function wrapWords(words: string[], maxWidth: number, prefix = ""): string[] {
 	const lines: string[] = [];
 	let current = prefix;
+	let currentWidth = displayWidth(prefix);
 	for (const word of words) {
 		const sep = current === prefix || current === "" ? "" : " ";
-		if (current.length + sep.length + word.length > maxWidth && current !== prefix) {
+		const wordWidth = displayWidth(word);
+		if (currentWidth + sep.length + wordWidth > maxWidth && current !== prefix) {
 			lines.push(current);
 			current = `${prefix}${word}`;
+			currentWidth = displayWidth(current);
 		} else {
 			current += sep + word;
+			currentWidth += sep.length + wordWidth;
 		}
 	}
 	if (current !== "") {
@@ -119,18 +174,22 @@ function wrapWords(words: string[], maxWidth: number, prefix = ""): string[] {
 
 /**
  * Truncate a line to the given visual width, ignoring ANSI escape sequences.
- * Never cuts inside an escape sequence or a multibyte character.
+ * Never cuts inside an escape sequence or a multibyte character. Re-closes
+ * styling with a reset when truncation drops escape sequences, so colors do
+ * not bleed past the ellipsis.
  */
-function fit(line: string, width: number): string {
+export function fit(line: string, width: number): string {
 	if (width <= 0) {
 		return "";
 	}
 	const chars = Array.from(line); // Split into code points; surrogate pairs stay intact.
 	let visual = 0;
 	let cut = chars.length;
+	let sawEscape = false;
 	for (let i = 0; i < chars.length; i++) {
 		if (chars[i] === "\x1b") {
 			// Skip the full escape sequence: \x1b[ <params> <letter> (e.g. \x1b[38;2;128;128;128m).
+			sawEscape = true;
 			let j = i + 1;
 			while (j < chars.length && !/[a-zA-Z]/.test(chars[j])) {
 				j++;
@@ -138,7 +197,7 @@ function fit(line: string, width: number): string {
 			i = j;
 			continue;
 		}
-		visual++;
+		visual += charDisplayWidth(chars[i]);
 		if (visual > width - 1) {
 			// Keep the last column for the ellipsis.
 			cut = i;
@@ -148,12 +207,24 @@ function fit(line: string, width: number): string {
 	if (cut >= chars.length) {
 		return line;
 	}
-	return `${chars.slice(0, cut).join("")}…`;
+	// Cut positions are always visible characters, so the kept prefix contains
+	// only complete escape sequences; a reset safely closes any style whose
+	// terminator was cut away.
+	return `${chars.slice(0, cut).join("")}…${sawEscape ? "\x1b[0m" : ""}`;
 }
 
 // ---------------------------------------------------------------------------
 // Resource enumeration (prompts, extensions) from disk + settings
 // ---------------------------------------------------------------------------
+
+/**
+ * Settings values are user-edited; coerce array entries to strings. Non-array
+ * values (including a lone string, which pi also rejects) yield an empty list
+ * so we never iterate a string character by character.
+ */
+export function stringArray(value: unknown): string[] {
+	return Array.isArray(value) ? value.map(String) : [];
+}
 
 function readJson(path: string): Record<string, unknown> | undefined {
 	try {
@@ -195,7 +266,7 @@ function packageFromDir(dir: string): PackageInfo | null {
 }
 
 /** npm package name from a settings spec: "npm:pkg", "npm:pkg@1.0.0", "npm:@scope/pkg@1" */
-function npmName(spec: string): string {
+export function npmName(spec: string): string {
 	const name = spec.replace(/^npm:/, "");
 	if (name.startsWith("@")) {
 		const parts = name.split("@");
@@ -205,7 +276,7 @@ function npmName(spec: string): string {
 }
 
 /** Git clone path from a settings spec: "git:github.com/u/r@v1", "https://…", "ssh://…" */
-function gitPath(spec: string): string {
+export function gitPath(spec: string): string {
 	const cleaned = spec
 		.replace(/^git:/, "")
 		.replace(/^ssh:\/\//, "")
@@ -220,10 +291,17 @@ function gitPath(spec: string): string {
 		.join("/");
 }
 
-/** Resolve a settings path: absolute first, then relative to cwd, then to the agent dir. */
-function resolveSettingsPath(path: string, cwd: string): string | undefined {
+/**
+ * Resolve a settings path: absolute first, then relative to cwd, then to the
+ * agent dir. Tilde expansion matches pi: only "~" and "~/…"; "~user" stays
+ * relative so it falls through to the cwd/agent-dir candidates.
+ */
+export function resolveSettingsPath(path: string, cwd: string): string | undefined {
+	const home = process.env.HOME;
+	const tildeExpanded =
+		path === "~" ? (home ?? path) : path.startsWith("~/") && home ? join(home, path.slice(2)) : path;
 	const candidates = [
-		path.startsWith("~") ? join(process.env.HOME ?? "", path.slice(1)) : path,
+		tildeExpanded,
 		resolve(cwd, path),
 		resolve(getAgentDir(), path),
 	];
@@ -248,8 +326,7 @@ function findPackages(settings: Record<string, unknown>, cwd: string): PackageIn
 	] as const;
 	const packages: PackageInfo[] = [];
 	const seen = new Set<string>();
-	const settingsPackages = (settings.packages ?? []) as string[];
-	for (const entry of settingsPackages) {
+	for (const entry of stringArray(settings.packages)) {
 		const spec = String(entry);
 		const isRemoteSpec = /^(npm:|git:|https?:\/\/|ssh:\/\/)/.test(spec);
 		if (!isRemoteSpec) {
@@ -288,7 +365,7 @@ function findPackages(settings: Record<string, unknown>, cwd: string): PackageIn
 }
 
 /** Add .md filenames (without extension) from a directory to a set. */
-function addPromptDir(names: Set<string>, dir: string): void {
+export function addPromptDir(names: Set<string>, dir: string): void {
 	if (!existsSync(dir)) {
 		return;
 	}
@@ -318,8 +395,7 @@ function listPrompts(cwd: string): string[] {
 	}
 
 	// Settings `prompts` entries (files or directories).
-	const settingsPrompts = (settings.prompts ?? []) as string[];
-	for (const entry of settingsPrompts) {
+	for (const entry of stringArray(settings.prompts)) {
 		const candidate = resolveSettingsPath(String(entry), cwd);
 		if (!candidate) {
 			continue;
@@ -335,8 +411,7 @@ function listPrompts(cwd: string): string[] {
 	}
 
 	// Local extension-directory installs (package manifests uncovered by findPackages).
-	const settingsExtensions = (settings.extensions ?? []) as string[];
-	for (const entry of settingsExtensions) {
+	for (const entry of stringArray(settings.extensions)) {
 		const resolved = join(cwd, String(entry));
 		if (!existsSync(resolved)) {
 			continue;
@@ -359,10 +434,10 @@ function listPrompts(cwd: string): string[] {
  * - any other file renders as "package:filename"
  * - a plain file renders as its basename
  */
-function extensionLabel(pkg: string, rel: string): string {
-	const norm = rel.replace(/^\.\//, "");
+export function extensionLabel(pkg: string, rel: string): string {
+	const norm = rel.replace(/^(\.\/)+/, "");
 	const base = basename(norm);
-	if (base === "index.ts") {
+	if (base === "index.ts" || base === "index.js") {
 		const dir = dirname(norm);
 		return dir === "." ? pkg : `${pkg}:${dir}`;
 	}
@@ -386,11 +461,12 @@ function listExtensions(cwd: string): string[] {
 		if (!existsSync(dir)) {
 			continue;
 		}
+		// pi loads *.ts/*.js files and subdirectories with index.ts/index.js.
 		for (const entry of readdirSync(dir)) {
 			const path = join(dir, entry);
-			if (entry.endsWith(".ts")) {
+			if (/\.(ts|js)$/.test(entry)) {
 				add(entry);
-			} else if (existsSync(join(path, "index.ts"))) {
+			} else if (existsSync(join(path, "index.ts")) || existsSync(join(path, "index.js"))) {
 				add(entry);
 			}
 		}
@@ -408,9 +484,8 @@ function listExtensions(cwd: string): string[] {
 	}
 
 	// Settings `extensions` entries: directories use package manifests, files show as basename.
-	const settingsExtensions = (settings.extensions ?? []) as string[];
-	for (const entry of settingsExtensions) {
-		const resolved = resolveSettingsPath(String(entry), cwd);
+	for (const entry of stringArray(settings.extensions)) {
+		const resolved = resolveSettingsPath(entry, cwd);
 		if (!resolved) {
 			continue;
 		}
@@ -423,7 +498,7 @@ function listExtensions(cwd: string): string[] {
 			for (const rel of pkg.extensions) {
 				add(extensionLabel(pkg.name, rel));
 			}
-		} else if (resolved.endsWith(".ts")) {
+		} else if (/\.(ts|js)$/.test(resolved)) {
 			add(basename(resolved));
 		}
 	}
@@ -444,6 +519,8 @@ interface ItemSection {
 	slash?: boolean;
 	/** Per-item descriptions shown when the entry is expanded (ctrl+o). */
 	descriptions?: Record<string, string>;
+	/** Set when items were capped; rendered as a dim trailing line instead of a fake item. */
+	truncatedTo?: string;
 }
 
 interface ContextEntryData {
@@ -508,8 +585,14 @@ function buildEntryData(
 ): ContextEntryData {
 	const resources = gatherResources(ctx, options);
 	const sections: ItemSection[] = [];
-	const addSection = (title: string, items: string[], slash = false, descriptions?: Record<string, string>) => {
-		sections.push({ kind: "items", title, items, slash, descriptions });
+	const addSection = (
+		title: string,
+		items: string[],
+		slash = false,
+		descriptions?: Record<string, string>,
+		truncatedTo?: string,
+	) => {
+		sections.push({ kind: "items", title, items, slash, descriptions, truncatedTo });
 	};
 
 	switch (args) {
@@ -520,7 +603,7 @@ function buildEntryData(
 				false,
 				Object.fromEntries(resources.skills.map((skill) => [skill.name, skill.description])),
 			);
-			break;
+			break; // /context skills is uncapped
 		case "prompts":
 			addSection("Prompts", listPrompts(ctx.cwd), true);
 			break;
@@ -538,12 +621,14 @@ function buildEntryData(
 				sessionName: ctx.sessionManager.getSessionName() ?? "",
 			};
 			const allSkills = resources.skills.map((skill) => skill.name);
-			const cappedSkills = allSkills.length > SKILL_CAP ? [...allSkills.slice(0, SKILL_CAP), `+${allSkills.length - SKILL_CAP} more (run /context skills for all)`] : allSkills;
 			addSection(
 				`Skills (${resources.skills.length})`,
-				cappedSkills,
+				allSkills.slice(0, SKILL_CAP),
 				false,
 				Object.fromEntries(resources.skills.map((skill) => [skill.name, skill.description])),
+				allSkills.length > SKILL_CAP
+					? `+${allSkills.length - SKILL_CAP} more — run /context skills for all`
+					: undefined,
 			);
 			addSection("Context Files", resources.contextFiles.map((path) => toHomePath(path)));
 			addSection("Prompts", listPrompts(ctx.cwd), true);
@@ -571,7 +656,10 @@ export default function (pi: ExtensionAPI) {
 
 	// Inline rendering (like /hotkeys): entries are TUI-only, never sent to the model.
 	pi.registerEntryRenderer("context-header", (entry, { expanded }, theme: Theme) => {
-		const data = entry.data as ContextEntryData;
+		// Entry data may come from an older session file written by a previous
+		// version; tolerate missing/malformed fields instead of crashing.
+		const data = (entry.data ?? {}) as Partial<ContextEntryData>;
+		const sections = Array.isArray(data.sections) ? data.sections : [];
 		return {
 			render(width: number): string[] {
 				const lines: string[] = [];
@@ -612,7 +700,10 @@ export default function (pi: ExtensionAPI) {
 				lines.push("");
 
 				// Generic sections.
-				for (const itemSection of data.sections) {
+				for (const itemSection of sections) {
+					if (!itemSection || !Array.isArray(itemSection.items)) {
+						continue;
+					}
 					section(itemSection.title);
 					if (itemSection.items.length === 0) {
 						lines.push(`  ${theme.fg("dim", "none")}`);
@@ -625,11 +716,13 @@ export default function (pi: ExtensionAPI) {
 							const suffix = desc ? ` — ${desc}` : "";
 							lines.push(fit(`  ${item}${suffix}`, width));
 						}
-						lines.push("");
-						continue;
+					} else {
+						const words = itemSection.items.map((item) => (itemSection.slash ? `/${item}` : item));
+						lines.push(...wrapWords(words, Math.max(0, width - 2), "  "));
 					}
-					const words = itemSection.items.map((item) => (itemSection.slash ? `/${item}` : item));
-					lines.push(...wrapWords(words, Math.max(0, width - 2), "  "));
+					if (itemSection.truncatedTo) {
+						lines.push(`  ${theme.fg("dim", itemSection.truncatedTo)}`);
+					}
 					lines.push("");
 				}
 
@@ -654,7 +747,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerShortcut("ctrl+shift+h", {
 		description: "Print session context (same as /context)",
 		handler: (ctx: ExtensionContext) => {
-			printContext(pi, ctx, "");
+			// Prefer live options when the runtime provides them (keeps tools
+			// fresh before the first agent run); otherwise fall back to the
+			// snapshot captured at the last before_agent_start.
+			const options = (ctx as ExtensionCommandContext).getSystemPromptOptions?.();
+			printContext(pi, ctx, "", options);
 		},
 	});
 }
