@@ -2,6 +2,8 @@
 
 Print the session context inline in [pi](https://pi.dev), the same way `/hotkeys` does — without depending on the startup header or `quietStartup`.
 
+That way you can set `quietStartup` to `true` for a clean ui but check the context on-demand without inspecting dofiles or spending tokens.
+
 ## What it shows
 
 - **Session** — model, thinking level, cwd, session id
