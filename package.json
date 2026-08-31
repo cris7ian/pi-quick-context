@@ -1,0 +1,20 @@
+{
+  "name": "pi-quick-context",
+  "version": "0.1.0",
+  "description": "Print session context inline in pi: loaded context files, skills, prompt templates, extensions, tools, and keybinding hints.",
+  "license": "MIT",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "context"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
