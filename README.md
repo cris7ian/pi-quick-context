@@ -11,7 +11,7 @@ That way you can set `quietStartup` to `true` for a clean ui but check the conte
 - **Context Files** — loaded `AGENTS.md` / `CLAUDE.md` files
 - **Skills** — all loaded skills
 - **Prompts** — prompt templates from the agent dir, project, settings, and installed packages
-- **Extensions** — loaded extensions in the startup header's label format (`pkg`, `pkg:file`, `pkg:dir`)
+- **Extensions** — enabled configured extensions in the startup header's label format (`pkg`, `pkg:file`, `pkg:dir`)
 - **Tools** — the currently active tool set
 
 Nothing the extension prints is sent to the model: content is rendered as a TUI-only custom entry.
@@ -23,7 +23,7 @@ Nothing the extension prints is sent to the model: content is rendered as a TUI-
 | `/context` | Full context: session, keys, context files, skills, prompts, extensions, tools |
 | `/context skills` | All skill names (expand with `ctrl+o` to see descriptions) |
 | `/context prompts` | All prompt template names |
-| `/context extensions` | All loaded extensions |
+| `/context extensions` | All enabled extension candidates |
 | `Ctrl+Shift+H` | Same as `/context` |
 
 ## Install
@@ -43,9 +43,11 @@ Then run `/reload` in an interactive pi session (or restart pi). Uninstall with 
 
 ## How it gets the data
 
-- Skills, context files, and tools come from the live system-prompt options when available, falling back to a `before_agent_start` snapshot, then to parsing the effective system prompt string (so it works on a fresh session and from the hotkey).
-- Prompts are enumerated from `~/.pi/agent/prompts`, `.pi/prompts`, settings `prompts` entries, and `pi.prompts` in installed npm/git packages.
-- Extensions are enumerated from `~/.pi/agent/extensions`, `.pi/extensions`, settings `packages`/`extensions`, and package `pi.extensions` manifests for both npm and git installs.
+- Skills, prompts, and tools come from pi's live runtime, so filtering, trust, reloads, and active-resource changes are already applied.
+- Context files use live system-prompt options when available. The hotkey falls back to the current effective system prompt.
+- Extensions use pi's settings-aware package resolver. It applies scopes, trust, filters, globs, conventions, and npm/git/local package resolution without loading extension code twice.
+
+Pi does not currently expose the final loaded-extension list to extensions. The extension section therefore shows enabled candidates and cannot include temporary CLI or inline extensions, or exclude a candidate that failed during loading.
 
 ## Development
 

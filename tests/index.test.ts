@@ -1,32 +1,113 @@
 /**
- * Tests for the pure helpers in src/index.ts.
+ * Tests for the extension behavior and pure helpers in src/index.ts.
  *
  * The functions under test are exported from the extension module; the pi
  * extension loader only consumes the default export, so the named exports are
  * test-only surface.
  */
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
+import type {
+	BuildSystemPromptOptions,
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	SlashCommandInfo,
+} from "@earendil-works/pi-coding-agent";
 
-import {
-	addPromptDir,
+import registerQuickContext, {
 	displayWidth,
 	extensionLabel,
+	firstAvailable,
 	fit,
 	gitPath,
+	listResolvedExtensions,
 	npmName,
 	parseFromPrompt,
-	resolveSettingsPath,
-	stringArray,
 	unescapeXml,
 	wrapWords,
 } from "../src/index.ts";
 
 const tempDirs: string[] = [];
+
+interface ExtensionHarness {
+	appended: unknown[];
+	command: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+	shortcut: (ctx: ExtensionContext) => Promise<void> | void;
+}
+
+function createExtensionHarness(commands: SlashCommandInfo[], activeTools: string[]): ExtensionHarness {
+	const appended: unknown[] = [];
+	let command: ExtensionHarness["command"] | undefined;
+	let shortcut: ExtensionHarness["shortcut"] | undefined;
+	const pi = {
+		on() {},
+		registerEntryRenderer() {},
+		registerCommand(_name: string, options: { handler: ExtensionHarness["command"] }) {
+			command = options.handler;
+		},
+		registerShortcut(_key: string, options: { handler: ExtensionHarness["shortcut"] }) {
+			shortcut = options.handler;
+		},
+		appendEntry(_type: string, data: unknown) {
+			appended.push(data);
+		},
+		getCommands: () => commands,
+		getActiveTools: () => activeTools,
+	} as unknown as ExtensionAPI;
+	registerQuickContext(pi);
+	assert.ok(command);
+	assert.ok(shortcut);
+	return { appended, command, shortcut };
+}
+
+function createContext(cwd: string, options: BuildSystemPromptOptions, systemPrompt = ""): ExtensionCommandContext {
+	return {
+		mode: "tui",
+		cwd,
+		ui: { notify() {} },
+		getSystemPrompt: () => systemPrompt,
+		getSystemPromptOptions: () => options,
+		isProjectTrusted: () => true,
+		sessionManager: {
+			getSessionId: () => "session-id",
+			getSessionName: () => undefined,
+		},
+	} as unknown as ExtensionCommandContext;
+}
+
+function createShortcutContext(cwd: string, systemPrompt = ""): ExtensionContext {
+	return {
+		mode: "tui",
+		cwd,
+		ui: { notify() {} },
+		getSystemPrompt: () => systemPrompt,
+		isProjectTrusted: () => true,
+		sessionManager: {
+			getSessionId: () => "session-id",
+			getSessionName: () => undefined,
+		},
+	} as unknown as ExtensionContext;
+}
+
+function createSkill(
+	name: string,
+	description: string,
+): NonNullable<BuildSystemPromptOptions["skills"]>[number] {
+	const filePath = `/${name}/SKILL.md`;
+	return {
+		name,
+		description,
+		filePath,
+		baseDir: `/${name}`,
+		disableModelInvocation: false,
+		sourceInfo: { path: filePath, source: "test", scope: "user", origin: "top-level" },
+	};
+}
 
 function makeTempDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "pi-quick-context-test-"));
@@ -38,7 +119,6 @@ afterEach(() => {
 	while (tempDirs.length > 0) {
 		rmSync(tempDirs.pop() as string, { recursive: true, force: true });
 	}
-	delete process.env.HOME;
 });
 
 describe("displayWidth", () => {
@@ -169,87 +249,185 @@ describe("extensionLabel", () => {
 });
 
 describe("parseFromPrompt", () => {
-	it("recovers context files and tools from a system prompt", () => {
+	it("recovers context files from a system prompt", () => {
 		const prompt = [
 			'<project_instructions path="/tmp/a &amp; b.md">',
 			"Some instructions.",
-			"Available tools:",
-			"- read: Read files",
-			"- bash: Run commands",
 		].join("\n");
 		const parsed = parseFromPrompt(prompt);
 		assert.deepEqual(parsed.contextFiles, ["/tmp/a & b.md"]);
-		assert.deepEqual(parsed.tools, ["read", "bash"]);
-	});
-
-	it("recovers skill names and unescapes them", () => {
-		const prompt = "<skill>\n<name>code &amp; review</name>\n</skill>";
-		assert.deepEqual(parseFromPrompt(prompt).skills, ["code & review"]);
 	});
 
 	it("returns empty lists for an unrelated prompt", () => {
 		const parsed = parseFromPrompt("Nothing to see here.");
-		assert.deepEqual(parsed, { skills: [], contextFiles: [], tools: [] });
+		assert.deepEqual(parsed, { contextFiles: [] });
 	});
 });
 
-describe("stringArray", () => {
-	it("coerces array entries to strings", () => {
-		assert.deepEqual(stringArray(["a", 2]), ["a", "2"]);
+describe("extension runtime inventory", () => {
+	it("uses pi's loaded prompt commands without filtering valid names", async () => {
+		const cwd = makeTempDir();
+		const commands = [
+			{ name: "Upper_Name", source: "prompt", sourceInfo: {} },
+			{ name: "revisión", source: "prompt", sourceInfo: {} },
+			{ name: "extension-command", source: "extension", sourceInfo: {} },
+		] as SlashCommandInfo[];
+		const harness = createExtensionHarness(commands, []);
+
+		await harness.command("prompts", createContext(cwd, { cwd }));
+
+		const data = harness.appended[0] as { sections: Array<{ title: string; items: string[] }> };
+		assert.equal(data.sections.length, 1);
+		assert.equal(data.sections[0]?.title, "Prompts");
+		assert.deepEqual(data.sections[0]?.items, ["Upper_Name", "revisión"]);
 	});
 
-	it("ignores a lone string (pi also rejects it)", () => {
-		assert.deepEqual(stringArray("one"), []);
+	it("uses the authoritative active tool list for the hotkey", async () => {
+		const cwd = makeTempDir();
+		const harness = createExtensionHarness([], []);
+		const ctx = createShortcutContext(cwd);
+
+		await harness.shortcut(ctx);
+
+		const data = harness.appended[0] as { sections: Array<{ title: string; items: string[] }> };
+		assert.deepEqual(data.sections.find((section) => section.title === "Tools")?.items, []);
 	});
 
-	it("returns an empty array for undefined and other non-arrays", () => {
-		assert.deepEqual(stringArray(undefined), []);
-		assert.deepEqual(stringArray({ a: 1 }), []);
+	it("does not resurrect stale skills or context files over explicit empty lists", async () => {
+		const cwd = makeTempDir();
+		const harness = createExtensionHarness(
+			[{ name: "skill:fallback-skill", description: "Fallback", source: "skill", sourceInfo: {} } as SlashCommandInfo],
+			[],
+		);
+		const fallbackPrompt = '<project_instructions path="/fallback/AGENTS.md">\nFallback\n</project_instructions>';
+
+		await harness.command("", createContext(cwd, { cwd, skills: [], contextFiles: [] }, fallbackPrompt));
+
+		const data = harness.appended[0] as { sections: Array<{ title: string; items: string[] }> };
+		assert.deepEqual(data.sections.find((section) => section.title.startsWith("Skills"))?.items, []);
+		assert.deepEqual(data.sections.find((section) => section.title === "Context Files")?.items, []);
+	});
+
+	it("reports identical current skills after resources change", async () => {
+		const cwd = makeTempDir();
+		const commands = [
+			{ name: "skill:old-skill", description: "Old", source: "skill", sourceInfo: {} },
+		] as SlashCommandInfo[];
+		const harness = createExtensionHarness(commands, []);
+		await harness.command(
+			"skills",
+			createContext(cwd, {
+				cwd,
+				skills: [createSkill("old-skill", "Old")],
+			}),
+		);
+
+		commands.splice(
+			0,
+			commands.length,
+			{ name: "skill:current-one", description: "One", source: "skill", sourceInfo: {} } as SlashCommandInfo,
+			{ name: "skill:current-two", description: "Two", source: "skill", sourceInfo: {} } as SlashCommandInfo,
+		);
+		const currentOptions: BuildSystemPromptOptions = {
+			cwd,
+			skills: [createSkill("current-one", "One"), createSkill("current-two", "Two")],
+		};
+		await harness.command("skills", createContext(cwd, currentOptions));
+		await harness.shortcut(createShortcutContext(cwd));
+
+		const commandData = harness.appended[1] as { sections: Array<{ title: string; items: string[] }> };
+		const shortcutData = harness.appended[2] as { sections: Array<{ title: string; items: string[] }> };
+		const commandSkills = commandData.sections.find((section) => section.title.startsWith("Skills"));
+		const shortcutSkills = shortcutData.sections.find((section) => section.title.startsWith("Skills"));
+		assert.deepEqual(commandSkills, shortcutSkills);
+		assert.equal(commandSkills?.title, "Skills (2)");
+		assert.deepEqual(commandSkills?.items, ["current-one", "current-two"]);
 	});
 });
 
-describe("resolveSettingsPath", () => {
-	it("resolves a relative path against cwd", () => {
-		const dir = makeTempDir();
-		writeFileSync(join(dir, "found.md"), "");
-		assert.equal(resolveSettingsPath("found.md", dir), join(dir, "found.md"));
-	});
+describe("listResolvedExtensions", () => {
+	it("honors scopes, trust, package filters, and convention resources", async () => {
+		const agentDir = makeTempDir();
+		const cwd = makeTempDir();
+		mkdirSync(join(agentDir, "extensions"));
+		writeFileSync(join(agentDir, "extensions", "global.ts"), "");
+		writeFileSync(join(agentDir, "extensions", "same.ts"), "");
+		mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "extensions", "project.ts"), "");
+		writeFileSync(join(cwd, ".pi", "extensions", "same.ts"), "");
+		mkdirSync(join(agentDir, "a"));
+		mkdirSync(join(agentDir, "b"));
+		writeFileSync(join(agentDir, "a", "same.ts"), "");
+		writeFileSync(join(agentDir, "b", "same.ts"), "");
 
-	it("expands ~ to HOME", () => {
-		const home = makeTempDir();
-		mkdirSync(join(home, "sub"));
-		writeFileSync(join(home, "sub", "file.md"), "");
-		process.env.HOME = home;
-		assert.equal(resolveSettingsPath("~/sub/file.md", "/nonexistent-cwd"), join(home, "sub", "file.md"));
-		assert.equal(resolveSettingsPath("~", "/nonexistent-cwd"), home);
-	});
+		const filtered = join(agentDir, "filtered-package");
+		mkdirSync(join(filtered, "extensions"), { recursive: true });
+		writeFileSync(join(filtered, "extensions", "keep.ts"), "");
+		writeFileSync(join(filtered, "extensions", "drop.ts"), "");
+		writeFileSync(
+			join(filtered, "package.json"),
+			JSON.stringify({ name: "filtered-package", pi: { extensions: ["extensions/keep.ts", "extensions/drop.ts"] } }),
+		);
 
-	it("does not expand ~user", () => {
-		const dir = makeTempDir();
-		process.env.HOME = dir;
-		assert.equal(resolveSettingsPath("~other/file.md", dir), undefined);
-	});
+		const promptOnly = join(agentDir, "prompt-only-package");
+		mkdirSync(join(promptOnly, "prompts"), { recursive: true });
+		writeFileSync(join(promptOnly, "prompts", "Upper_Name.md"), "");
+		writeFileSync(join(promptOnly, "package.json"), JSON.stringify({ name: "prompt-only-package", pi: { prompts: ["prompts"] } }));
+		const convention = join(agentDir, "convention-package");
+		mkdirSync(join(convention, "extensions"), { recursive: true });
+		writeFileSync(join(convention, "extensions", "index.ts"), "");
+		writeFileSync(join(convention, "package.json"), JSON.stringify({ name: "convention-package" }));
+		const nested = join(agentDir, "nested-package");
+		mkdirSync(join(nested, "src"), { recursive: true });
+		writeFileSync(join(nested, "src", "index.ts"), "");
+		writeFileSync(join(nested, "package.json"), JSON.stringify({ name: "nested-package", pi: { extensions: ["src/index.ts"] } }));
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				extensions: ["a/same.ts", "b/same.ts"],
+				packages: [
+					{ source: "./filtered-package", extensions: ["extensions/keep.ts"] },
+					"./prompt-only-package",
+					"./convention-package",
+					"./nested-package",
+				],
+			}),
+		);
 
-	it("returns undefined when no candidate exists", () => {
-		const dir = makeTempDir();
-		assert.equal(resolveSettingsPath("missing.md", dir), undefined);
+		const trusted = await listResolvedExtensions(cwd, agentDir, true);
+		assert.ok(trusted.some((label) => label.includes("global")));
+		assert.ok(trusted.some((label) => label.includes("project")));
+		assert.ok(trusted.some((label) => label.includes("keep")));
+		assert.ok(trusted.includes("convention-package"));
+		assert.ok(trusted.includes("nested-package:src"));
+		assert.ok(!trusted.some((label) => label.includes("drop") || label.includes("prompt-only")));
+		const collisionLabels = trusted.filter((label) => label.endsWith("same.ts"));
+		assert.equal(collisionLabels.length, 4);
+		assert.equal(new Set(collisionLabels).size, 4);
+
+		const untrusted = await listResolvedExtensions(cwd, agentDir, false);
+		assert.ok(!untrusted.some((label) => label.includes("project")));
 	});
 });
 
-describe("addPromptDir", () => {
-	it("collects lowercase .md names without extension", () => {
-		const dir = makeTempDir();
-		writeFileSync(join(dir, "alpha.md"), "");
-		writeFileSync(join(dir, "Beta.md"), ""); // uppercase: not a valid command name
-		writeFileSync(join(dir, "notes.txt"), ""); // not .md
-		const names = new Set<string>();
-		addPromptDir(names, dir);
-		assert.deepEqual([...names], ["alpha"]);
+describe("firstAvailable", () => {
+	it("keeps an authoritative empty list", () => {
+		assert.deepEqual(firstAvailable([], ["stale"]), []);
 	});
 
-	it("ignores missing directories", () => {
-		const names = new Set<string>();
-		addPromptDir(names, join(makeTempDir(), "nope"));
-		assert.equal(names.size, 0);
+	it("falls back only when a source is unavailable", () => {
+		assert.deepEqual(firstAvailable(undefined, ["current"]), ["current"]);
+	});
+});
+
+describe("runtime compatibility", () => {
+	it("supports the same minimum Node version as pi", () => {
+		const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+			engines: { node: string };
+		};
+		const piPackageJson = JSON.parse(
+			readFileSync(new URL("../node_modules/@earendil-works/pi-coding-agent/package.json", import.meta.url), "utf8"),
+		) as { engines: { node: string } };
+		assert.equal(packageJson.engines.node, piPackageJson.engines.node);
 	});
 });
