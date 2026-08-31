@@ -29,11 +29,8 @@ Nothing the extension prints is sent to the model: content is rendered as a TUI-
 ## Install
 
 ```bash
-# Local checkout (development)
-pi install ~/Developer/pi-quick-context
-
 # From GitHub
-pi install git:github.com/<user>/pi-quick-context
+pi install git:github.com/cris7ian/pi-quick-context
 
 # From npm
 pi install npm:pi-quick-context

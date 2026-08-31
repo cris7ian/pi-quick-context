@@ -18,9 +18,8 @@
  * package resolver.
  *
  * Install:
- *   pi install ~/Developer/pi-quick-context        # local checkout
- *   pi install git:github.com/<user>/pi-quick-context  # from GitHub
- *   pi install npm:pi-quick-context                # from npm
+ *   pi install git:github.com/cris7ian/pi-quick-context  # from GitHub
+ *   pi install npm:pi-quick-context                      # from npm
  */
 
 import type {
