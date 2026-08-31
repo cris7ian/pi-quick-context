@@ -9,6 +9,19 @@
     "pi-extension",
     "context"
   ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cris7ian/pi-quick-context.git"
+  },
+  "homepage": "https://github.com/cris7ian/pi-quick-context",
+  "bugs": {
+    "url": "https://github.com/cris7ian/pi-quick-context/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
