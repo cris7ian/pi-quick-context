@@ -42,6 +42,7 @@ import { basename, dirname, relative } from "path";
 /** Cap for skills in the full /context view; /context skills is uncapped. */
 const SKILL_CAP = 40;
 
+/** Decode XML entities in a file path parsed from the system prompt. */
 export function unescapeXml(value: string): string {
 	return value
 		.replace(/&quot;/g, '"')
@@ -72,7 +73,7 @@ export function parseFromPrompt(prompt: string): {
 // Render helpers (ANSI-safe, width-aware)
 // ---------------------------------------------------------------------------
 
-// --- Display width -----------------------------------------------------------
+// --- Display width ---------------------------------------------------------
 
 /** Code point ranges that occupy two terminal columns. */
 const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
@@ -89,12 +90,13 @@ const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
 /** Approximate terminal column width for a code point (1 or 2 columns). */
 export function isWideCodePoint(cp: number): boolean {
 	if (cp >= 0x20000) {
-		// CJK extensions B+
+		// CJK extensions B+ and later.
 		return true;
 	}
 	return WIDE_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
 }
 
+/** Terminal column width of a single character (1 or 2 columns). */
 export function charDisplayWidth(ch: string): number {
 	return isWideCodePoint(ch.codePointAt(0) ?? 0) ? 2 : 1;
 }
@@ -119,7 +121,7 @@ export function displayWidth(text: string): number {
 	return width;
 }
 
-// --- Wrapping / fitting -------------------------------------------------------
+// --- Wrapping / fitting ----------------------------------------------------
 
 /** Wrap a list of short words into lines no wider than maxWidth columns. */
 export function wrapWords(words: string[], maxWidth: number, prefix = ""): string[] {
@@ -189,7 +191,7 @@ export function fit(line: string, width: number): string {
 // Resource enumeration
 // ---------------------------------------------------------------------------
 
-/** npm package name from a settings spec: "npm:pkg", "npm:pkg@1.0.0", "npm:@scope/pkg@1" */
+/** Extract the npm package name from a settings spec: "npm:pkg", "npm:pkg@1.0.0", "npm:@scope/pkg@1". */
 export function npmName(spec: string): string {
 	const name = spec.replace(/^npm:/, "");
 	if (name.startsWith("@")) {
@@ -199,7 +201,7 @@ export function npmName(spec: string): string {
 	return name.split("@")[0];
 }
 
-/** Git clone path from a settings spec: "git:github.com/u/r@v1", "https://…", "ssh://…" */
+/** Extract the clone path from a settings spec: "git:github.com/u/r@v1", "https://…", "ssh://…". */
 export function gitPath(spec: string): string {
 	const cleaned = spec
 		.replace(/^git:/, "")
@@ -237,6 +239,7 @@ export function extensionLabel(pkg: string, rel: string): string {
 	return `${pkg}:${norm}`;
 }
 
+/** Display label for one extension record: package name, scoped path, or plain file name. */
 function resolvedExtensionLabel(
 	path: string,
 	metadata: { source: string; origin: "package" | "top-level"; baseDir?: string },
@@ -342,6 +345,7 @@ export function firstAvailable<T>(...values: (T[] | undefined)[]): T[] {
 	return [];
 }
 
+/** Replace a leading home directory with "~" for display. */
 function toHomePath(path: string): string {
 	const home = process.env.HOME;
 	if (home && path.startsWith(home + "/")) {
@@ -379,6 +383,7 @@ function gatherResources(pi: ExtensionAPI, ctx: ExtensionContext, options?: Buil
 	return { skills, contextFiles, tools };
 }
 
+/** Assemble the /context entry data (sections and optional session meta). */
 async function buildEntryData(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
@@ -412,7 +417,7 @@ async function buildEntryData(
 
 	switch (args) {
 		case "skills":
-			addSkillsSection(true); // /context skills is uncapped
+			addSkillsSection(true); // /context skills is uncapped.
 			break;
 		case "prompts":
 			addSection("Prompts", listPrompts(pi), true);
@@ -441,6 +446,7 @@ async function buildEntryData(
 	return { sections };
 }
 
+/** Append the /context entry to the chat, gated on interactive mode. */
 async function printContext(pi: ExtensionAPI, ctx: ExtensionContext, args: string, options?: BuildSystemPromptOptions): Promise<void> {
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify("The context print is only available in interactive mode.", "warning");
@@ -449,6 +455,7 @@ async function printContext(pi: ExtensionAPI, ctx: ExtensionContext, args: strin
 	pi.appendEntry("context-header", await buildEntryData(pi, ctx, args, options));
 }
 
+/** Register the context renderer, command, and shortcut. */
 export default function (pi: ExtensionAPI) {
 	// Inline rendering (like /hotkeys): entries are TUI-only, never sent to the model.
 	pi.registerEntryRenderer("context-header", (entry, { expanded }, theme: Theme) => {
