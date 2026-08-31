@@ -74,26 +74,28 @@ export function parseFromPrompt(prompt: string): {
 
 // --- Display width -----------------------------------------------------------
 
-/** Approximate terminal column width for a code point (0, 1, or 2 columns). */
+/** Code point ranges that occupy two terminal columns. */
+const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
+	[0x1100, 0x115f], // Hangul Jamo
+	[0x2e80, 0xa4cf], // CJK radicals .. Yijing hexagrams
+	[0xac00, 0xd7a3], // Hangul syllables
+	[0xf900, 0xfaff], // CJK compatibility ideographs
+	[0xfe30, 0xfe4f], // CJK compatibility forms
+	[0xff00, 0xff60], // Fullwidth forms
+	[0xffe0, 0xffe6], // Fullwidth signs
+	[0x1f300, 0x1faff], // Emoji (most)
+];
+
+/** Approximate terminal column width for a code point (1 or 2 columns). */
 export function isWideCodePoint(cp: number): boolean {
-	return (
-		(cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
-		(cp >= 0x2e80 && cp <= 0xa4cf) || // CJK radicals .. Yijing hexagrams
-		(cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
-		(cp >= 0xf900 && cp <= 0xfaff) || // CJK compatibility ideographs
-		(cp >= 0xfe30 && cp <= 0xfe4f) || // CJK compatibility forms
-		(cp >= 0xff00 && cp <= 0xff60) || // Fullwidth forms
-		(cp >= 0xffe0 && cp <= 0xffe6) || // Fullwidth signs
-		(cp >= 0x1f300 && cp <= 0x1faff) || // Emoji (most)
-		cp >= 0x20000 // CJK extensions B+
-	);
+	if (cp >= 0x20000) {
+		// CJK extensions B+
+		return true;
+	}
+	return WIDE_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
 }
 
 export function charDisplayWidth(ch: string): number {
-	// Combining marks, zero-width spaces, variation selectors, BOM: 0 columns.
-	if (/[\u0300-\u036f\u200b-\u200f\ufe00-\ufe0f\ufeff]/.test(ch)) {
-		return 0;
-	}
 	return isWideCodePoint(ch.codePointAt(0) ?? 0) ? 2 : 1;
 }
 
@@ -259,7 +261,10 @@ function resolvedExtensionLabel(
 	return dir === "." ? basename(metadata.baseDir ?? dirname(path)) : dir;
 }
 
-/** Resolve enabled extension candidates without executing their factories. */
+/**
+ * Resolve enabled extension candidates without executing their factories.
+ * Disambiguates duplicate labels by scope, then by full path.
+ */
 export async function listResolvedExtensions(cwd: string, agentDir: string, projectTrusted: boolean): Promise<string[]> {
 	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
@@ -277,26 +282,13 @@ export async function listResolvedExtensions(cwd: string, agentDir: string, proj
 		const scopedLabel = `${record.resource.metadata.scope}:${record.label}`;
 		scopedLabelCounts.set(scopedLabel, (scopedLabelCounts.get(scopedLabel) ?? 0) + 1);
 	}
-	return records.map((record, index) => {
+	return records.map((record) => {
 		if (labelCounts.get(record.label) === 1) {
 			return record.label;
 		}
 		const scopedLabel = `${record.resource.metadata.scope}:${record.label}`;
 		if (scopedLabelCounts.get(scopedLabel) === 1) {
 			return scopedLabel;
-		}
-		const segments = record.resource.path.replace(/\\/g, "/").split("/").filter(Boolean);
-		for (let count = 2; count <= segments.length; count++) {
-			const suffix = segments.slice(-count).join("/");
-			const unique = records.every((other, otherIndex) => {
-				if (otherIndex === index || other.label !== record.label || other.resource.metadata.scope !== record.resource.metadata.scope) {
-					return true;
-				}
-				return !other.resource.path.replace(/\\/g, "/").endsWith(suffix);
-			});
-			if (unique) {
-				return `${record.resource.metadata.scope}:${suffix}`;
-			}
 		}
 		return `${record.resource.metadata.scope}:${record.resource.path.replace(/\\/g, "/")}`;
 	});
@@ -405,15 +397,23 @@ async function buildEntryData(
 		sections.push({ kind: "items", title, items, slash, descriptions, truncatedTo });
 	};
 
+	const addSkillsSection = (uncapped: boolean) => {
+		const names = resources.skills.map((skill) => skill.name);
+		addSection(
+			`Skills (${resources.skills.length})`,
+			uncapped ? names : names.slice(0, SKILL_CAP),
+			false,
+			Object.fromEntries(resources.skills.map((skill) => [skill.name, skill.description])),
+			!uncapped && names.length > SKILL_CAP
+				? `+${names.length - SKILL_CAP} more — run /context skills for all`
+				: undefined,
+		);
+	};
+
 	switch (args) {
 		case "skills":
-			addSection(
-				`Skills (${resources.skills.length})`,
-				resources.skills.map((skill) => skill.name),
-				false,
-				Object.fromEntries(resources.skills.map((skill) => [skill.name, skill.description])),
-			);
-			break; // /context skills is uncapped
+			addSkillsSection(true); // /context skills is uncapped
+			break;
 		case "prompts":
 			addSection("Prompts", listPrompts(pi), true);
 			break;
@@ -430,16 +430,7 @@ async function buildEntryData(
 				sessionId: ctx.sessionManager.getSessionId(),
 				sessionName: ctx.sessionManager.getSessionName() ?? "",
 			};
-			const allSkills = resources.skills.map((skill) => skill.name);
-			addSection(
-				`Skills (${resources.skills.length})`,
-				allSkills.slice(0, SKILL_CAP),
-				false,
-				Object.fromEntries(resources.skills.map((skill) => [skill.name, skill.description])),
-				allSkills.length > SKILL_CAP
-					? `+${allSkills.length - SKILL_CAP} more — run /context skills for all`
-					: undefined,
-			);
+			addSkillsSection(false);
 			addSection("Context Files", resources.contextFiles.map((path) => toHomePath(path)));
 			addSection("Prompts", listPrompts(pi), true);
 			addSection("Extensions", await listExtensions(ctx));
